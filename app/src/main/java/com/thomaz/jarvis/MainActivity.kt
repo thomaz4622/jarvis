@@ -328,11 +328,9 @@ class MainActivity : Activity() {
     private fun escolherChave() {
         AlertDialog.Builder(this)
             .setTitle("Configurações")
-            .setItems(arrayOf("Chave do Gemini", "Chave da Picovoice (palavra Jarvis)", "Voz do Gemini: ligar/desligar")) { _, quem ->
+            .setItems(arrayOf("Chave do Gemini", "Voz do Gemini: ligar/desligar")) { _, quem ->
                 if (quem == 0) {
                     pedirChave("Chave do Gemini", "chave")
-                } else if (quem == 1) {
-                    pedirChave("Chave da Picovoice", "chave_pv")
                 } else {
                     val liga = !prefs().getBoolean("voz_gemini", true)
                     prefs().edit().putBoolean("voz_gemini", liga).apply()
@@ -353,11 +351,6 @@ class MainActivity : Activity() {
     private fun ativar() {
         if (chave("chave").isEmpty()) {
             pedirChave("Chave do Gemini", "chave")
-            return
-        }
-        if (chave("chave_pv").isEmpty()) {
-            status.text = "Crie a chave grátis em console.picovoice.ai e cole aqui"
-            pedirChave("Chave da Picovoice", "chave_pv")
             return
         }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
