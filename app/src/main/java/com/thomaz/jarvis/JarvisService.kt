@@ -1,15 +1,10 @@
 package com.thomaz.jarvis
 
-import ai.picovoice.porcupine.Porcupine
-import ai.picovoice.porcupine.PorcupineManager
-import ai.picovoice.porcupine.PorcupineManagerCallback
-import ai.picovoice.porcupine.PorcupineManagerErrorCallback
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
@@ -45,7 +40,7 @@ class JarvisService : Service() {
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var voz: Voz
     private lateinit var cerebro: Cerebro
-    private var porcupine: PorcupineManager? = null
+    private lateinit var palavra: Palavra
     private var reconhecedor: SpeechRecognizer? = null
     private var ocupado = true
     private var parado = false
@@ -57,6 +52,7 @@ class JarvisService : Service() {
         super.onCreate()
         cerebro = Cerebro(this)
         voz = Voz(this)
+        palavra = Palavra(this)
         voz.iniciar {
             if (!parado) falar("Sistema online. Diga Jarvis, espere o bip e fale o comando, senhor.")
         }
@@ -76,10 +72,7 @@ class JarvisService : Service() {
         rodando = true
         if (intent?.action == ACAO_OUVIR && !ocupado) {
             ocupado = true
-            try {
-                porcupine?.stop()
-            } catch (e: Exception) {
-            }
+            palavra.parar()
             bip()
             ui.postDelayed({ ouvirComando() }, 250)
         }
@@ -125,40 +118,28 @@ class JarvisService : Service() {
 
     private fun iniciarPalavra() {
         if (parado || ocupado) return
-        try {
-            if (porcupine == null) {
-                val chave = getSharedPreferences("jarvis", Context.MODE_PRIVATE).getString("chave_pv", "") ?: ""
-                if (chave.isEmpty()) {
-                    mudar("Falta a chave da Picovoice. Abra o app e segure o título.", M_ESPERA)
-                    return
+        palavra.preparar(
+            { s -> if (!parado) mudar(s, M_ESPERA) },
+            {
+                if (!parado && !ocupado) {
+                    palavra.iniciar(
+                        { ui.post { acordar() } },
+                        { msg -> ui.post { mudar(msg, M_ESPERA) } }
+                    )
+                    mudar(aguardando, M_ESPERA)
                 }
-                porcupine = PorcupineManager.Builder()
-                    .setAccessKey(chave)
-                    .setKeyword(Porcupine.BuiltInKeyword.JARVIS)
-                    .setSensitivity(0.7f)
-                    .setErrorCallback(PorcupineManagerErrorCallback { e ->
-                        ui.post { mudar("Erro no microfone: " + e.message, M_ESPERA) }
-                    })
-                    .build(this, PorcupineManagerCallback { _ -> ui.post { acordar() } })
-            }
-            porcupine?.start()
-            mudar(aguardando, M_ESPERA)
-        } catch (e: Exception) {
-            porcupine = null
-            mudar("Palavra de ativação falhou: " + (e.message ?: "erro") + ". Confira a chave da Picovoice.", M_ESPERA)
-        }
+            },
+            { msg -> ui.post { mudar(msg, M_ESPERA) } }
+        )
     }
 
     private fun acordar() {
         if (parado || ocupado) return
         ocupado = true
-        try {
-            porcupine?.stop()
-        } catch (e: Exception) {
-        }
+        palavra.parar()
         mudar("Ouvindo...", M_OUVINDO)
         bip()
-        ui.postDelayed({ ouvirComando() }, 250)
+        ui.postDelayed({ ouvirComando() }, 300)
     }
 
     private fun ouvirComando() {
@@ -241,12 +222,7 @@ class JarvisService : Service() {
         } catch (e: Exception) {
         }
         reconhecedor = null
-        try {
-            porcupine?.stop()
-            porcupine?.delete()
-        } catch (e: Exception) {
-        }
-        porcupine = null
+        palavra.encerrar()
         voz.encerrar()
         mudar("Jarvis desativado", M_ESPERA)
         stopForeground(true)
@@ -261,11 +237,9 @@ class JarvisService : Service() {
         } catch (e: Exception) {
         }
         try {
-            porcupine?.stop()
-            porcupine?.delete()
+            palavra.encerrar()
         } catch (e: Exception) {
         }
-        porcupine = null
         try {
             voz.encerrar()
         } catch (e: Exception) {
