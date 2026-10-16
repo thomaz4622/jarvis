@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -29,12 +30,16 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.Normalizer
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
 import java.util.Locale
 import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
 
-    private val sistema = "Você é o J.A.R.V.I.S., assistente pessoal do Tom. Responda sempre em português do Brasil, de forma curta (no máximo 3 frases), educada e elegante, como no filme Homem de Ferro. Não use markdown, asteriscos nem emojis, pois sua resposta será falada em voz alta."
+    private val sistema = "Você é o J.A.R.V.I.S., assistente pessoal do Tom. Responda sempre em português do Brasil, de forma curta (no máximo 3 frases), educada e elegante, como no filme Homem de Ferro. Não use markdown, asteriscos nem emojis, pois sua resposta será falada em voz alta. Pedidos para abrir aplicativos ou pesquisar são tratados por outra parte do sistema: se algo assim chegar até você, diga que não entendeu o comando e peça para repetir de forma simples, por exemplo: abrir WhatsApp."
 
     private lateinit var tts: TextToSpeech
     private var ttsPronto = false
@@ -216,6 +221,12 @@ class MainActivity : Activity() {
 
     private fun responder(texto: String) {
         addLog("Você: $texto")
+        val local = comandoLocal(texto)
+        if (local != null) {
+            addLog("Jarvis: $local")
+            falar(local)
+            return
+        }
         status.text = "Pensando..."
         pulsar(true)
         thread {
@@ -227,6 +238,121 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun norm(s: String): String =
+        Normalizer.normalize(s.lowercase(Locale("pt", "BR")), Normalizer.Form.NFD)
+            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+
+    private fun comandoLocal(original: String): String? {
+        var t = norm(original).replace(Regex("[,.!?]"), " ")
+        t = t.replace(Regex("\\s+"), " ").trim()
+        t = t.replace(Regex("^((jarvis|por favor|ok|oi|ola|boa noite|bom dia|boa tarde|entao|pode|poderia|voce pode) )+"), "").trim()
+
+        if ((t.contains("que horas") || t.contains("as horas") || t.contains("hora e agora") || t.contains("hora atual")) && !t.contains("quantas")) {
+            val c = Calendar.getInstance()
+            val h = c.get(Calendar.HOUR_OF_DAY)
+            val m = c.get(Calendar.MINUTE)
+            val horas = when (h) {
+                0 -> "É meia-noite"
+                1 -> "É 1 hora"
+                12 -> "É meio-dia"
+                else -> "São $h horas"
+            }
+            val minutos = when (m) {
+                0 -> " em ponto"
+                1 -> " e 1 minuto"
+                else -> " e $m minutos"
+            }
+            return "$horas$minutos, senhor."
+        }
+
+        if (t.contains("que dia") || t.contains("data de hoje") || t.contains("dia e hoje")) {
+            val f = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy", Locale("pt", "BR"))
+            return "Hoje é ${f.format(Date())}, senhor."
+        }
+
+        val verbo = Regex("^(abr\\w*|inici\\w*|execut\\w*|toc\\w*|pesquis\\w*|busc\\w*|procur\\w*|mostr\\w*|coloc\\w*)\\b")
+        if (!verbo.containsMatchIn(t)) return null
+
+        if (t.contains("youtube")) {
+            val semYt = t.replace("no youtube", " ").replace("youtube", " ").replace(Regex("\\s+"), " ").trim()
+            val m = Regex("(?:videos?|busc\\w*|pesquis\\w*|procur\\w*|toc\\w+|mostr\\w*)\\s+(?:de |do |da |sobre |por )?(.+)").find(semYt)
+            val consulta = m?.groupValues?.get(1)?.replace(Regex("\\bpor favor\\b"), "")?.trim() ?: ""
+            if (consulta.isNotEmpty()) {
+                abrirUrl("https://www.youtube.com/results?search_query=" + Uri.encode(consulta), "com.google.android.youtube")
+                return "Buscando $consulta no YouTube, senhor."
+            }
+            return if (abrirApp("youtube")) "Abrindo o YouTube, senhor." else "Não consegui abrir o YouTube, senhor."
+        }
+
+        val pesq = Regex("^(?:pesquis\\w*|busc\\w*|procur\\w*)\\s+(?:no google |na internet |por |sobre |de )*(.+)").find(t)
+        if (pesq != null) {
+            val q = pesq.groupValues[1].replace(Regex("\\bpor favor\\b"), "").trim()
+            if (q.isNotEmpty()) {
+                abrirUrl("https://www.google.com/search?q=" + Uri.encode(q), null)
+                return "Pesquisando $q, senhor."
+            }
+        }
+
+        val abrir = Regex("^(?:abr\\w*|inici\\w*|execut\\w*)\\s+(?:(?:o|a|os|as|meu|minha|aplicativo|app) )*(.+)").find(t)
+        if (abrir != null) {
+            val nome = abrir.groupValues[1]
+                .replace(Regex("\\b(por favor|pra mim|para mim|aplicativo|app)\\b"), "")
+                .replace(Regex("\\s+"), " ").trim()
+            if (nome.isNotEmpty()) {
+                return if (abrirApp(nome)) "Abrindo $nome, senhor." else "Não encontrei o aplicativo $nome, senhor."
+            }
+        }
+        return null
+    }
+
+    private fun abrirUrl(url: String, pacote: String?) {
+        val i = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (pacote != null) i.setPackage(pacote)
+        try {
+            startActivity(i)
+        } catch (e: Exception) {
+            i.setPackage(null)
+            try {
+                startActivity(i)
+            } catch (e2: Exception) {
+            }
+        }
+    }
+
+    private fun abrirApp(nome: String): Boolean {
+        val pm = packageManager
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val lista = pm.queryIntentActivities(intent, 0)
+        var melhor: String? = null
+        var nota = 0
+        for (ri in lista) {
+            val rotulo = norm(ri.loadLabel(pm).toString())
+            val n = if (rotulo == nome) 3
+            else if (rotulo.startsWith(nome)) 2
+            else if (rotulo.contains(nome) || (rotulo.length >= 3 && nome.contains(rotulo))) 1
+            else 0
+            if (n > nota) {
+                nota = n
+                melhor = ri.activityInfo.packageName
+            }
+        }
+        if (melhor == null) return false
+        val li = pm.getLaunchIntentForPackage(melhor) ?: return false
+        li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            startActivity(li)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun sistemaAgora(): String {
+        val f = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy, HH:mm", Locale("pt", "BR"))
+        return sistema + " Data e hora atuais do usuário: " + f.format(Date()) + "."
+    }
+
     private fun perguntar(texto: String): String {
         val turnoUser = JSONObject().put("role", "user")
             .put("parts", JSONArray().put(JSONObject().put("text", texto)))
@@ -234,7 +360,7 @@ class MainActivity : Activity() {
         for (i in 0 until historico.length()) conteudo.put(historico.get(i))
         conteudo.put(turnoUser)
         val corpo = JSONObject()
-            .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sistema))))
+            .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sistemaAgora()))))
             .put("contents", conteudo)
         val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key=" + chave()
         var erro = ""
