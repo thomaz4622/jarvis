@@ -136,22 +136,26 @@ class Palavra(private val ctx: Context) {
         }
         if (txt.isNotEmpty() && regex.containsMatchIn(txt.lowercase())) {
             disparou = true
-            parar()
-            aoOuvir()
+            ui.post {
+                parar()
+                aoOuvir()
+            }
         }
     }
 
     fun parar() {
-        try {
-            servico?.shutdown()
-        } catch (e: Throwable) {
-        }
+        val s = servico
+        val r = reconhecedor
         servico = null
+        reconhecedor = null
         try {
-            reconhecedor?.close()
+            s?.cancel()
         } catch (e: Throwable) {
         }
-        reconhecedor = null
+        try {
+            r?.close()
+        } catch (e: Throwable) {
+        }
     }
 
     fun encerrar() {
