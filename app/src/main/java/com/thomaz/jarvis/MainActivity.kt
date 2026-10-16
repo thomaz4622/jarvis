@@ -236,9 +236,9 @@ class MainActivity : Activity() {
         val corpo = JSONObject()
             .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sistema))))
             .put("contents", conteudo)
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + chave()
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key=" + chave()
         var erro = ""
-        for (t in 0 until 4) {
+        for (t in 0 until 3) {
             try {
                 val c = URL(url).openConnection() as HttpURLConnection
                 c.requestMethod = "POST"
@@ -262,6 +262,8 @@ class MainActivity : Activity() {
                     }
                     salvarHistorico()
                     return resposta
+                } else if (codigo == 429) {
+                    return "O limite gratuito do Google foi atingido, senhor. Aguarde um minuto e tente novamente."
                 } else if (codigo == 400 || codigo == 401 || codigo == 403 || codigo == 404) {
                     return "Há um problema com a chave ou o modelo, senhor (erro $codigo). Segure o título por alguns segundos para trocar a chave."
                 } else {
