@@ -1,24 +1,27 @@
 package com.thomaz.jarvis
 
+import ai.picovoice.porcupine.Porcupine
+import ai.picovoice.porcupine.PorcupineManager
+import ai.picovoice.porcupine.PorcupineManagerCallback
+import ai.picovoice.porcupine.PorcupineManagerErrorCallback
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import java.util.Locale
 import kotlin.concurrent.thread
 
 class JarvisService : Service() {
@@ -26,22 +29,26 @@ class JarvisService : Service() {
     companion object {
         const val ACAO_PARAR = "com.thomaz.jarvis.PARAR"
         const val ACAO_OUVIR = "com.thomaz.jarvis.OUVIR"
+        const val M_ESPERA = 0
+        const val M_OUVINDO = 1
+        const val M_PENSANDO = 2
+        const val M_FALANDO = 3
         var rodando = false
         var ultimoStatus = ""
+        var ultimoModo = 0
+        var totalLinhas = 0
         val linhas = ArrayList<String>()
-        var aoMudar: ((String, Boolean) -> Unit)? = null
+        var aoMudar: ((String, Int) -> Unit)? = null
         var aoLogar: ((String) -> Unit)? = null
     }
 
     private val ui = Handler(Looper.getMainLooper())
-    private var tts: TextToSpeech? = null
-    private var ttsPronto = false
-    private var reconhecedor: SpeechRecognizer? = null
+    private lateinit var voz: Voz
     private lateinit var cerebro: Cerebro
+    private var porcupine: PorcupineManager? = null
+    private var reconhecedor: SpeechRecognizer? = null
     private var ocupado = true
     private var parado = false
-    private var comandoAte = 0L
-    private val reiniciar = Runnable { iniciarEscuta() }
     private val aguardando = "Aguardando \"Jarvis\"..."
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -49,26 +56,9 @@ class JarvisService : Service() {
     override fun onCreate() {
         super.onCreate()
         cerebro = Cerebro(this)
-        tts = TextToSpeech(this) { s ->
-            ui.post {
-                if (parado) return@post
-                if (s == TextToSpeech.SUCCESS) {
-                    tts?.language = Locale("pt", "BR")
-                    tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                        override fun onStart(id: String?) {}
-                        override fun onDone(id: String?) {
-                            ui.post { fimDaFala() }
-                        }
-                        override fun onError(id: String?) {
-                            ui.post { fimDaFala() }
-                        }
-                    })
-                    ttsPronto = true
-                    falar("Sistema online. Diga Jarvis quando precisar, senhor.")
-                } else {
-                    fimDaFala()
-                }
-            }
+        voz = Voz(this)
+        voz.iniciar {
+            if (!parado) falar("Sistema online. Diga Jarvis, espere o bip e fale o comando, senhor.")
         }
     }
 
@@ -85,15 +75,13 @@ class JarvisService : Service() {
         }
         rodando = true
         if (intent?.action == ACAO_OUVIR && !ocupado) {
-            comandoAte = SystemClock.elapsedRealtime() + 8000
             ocupado = true
-            ui.removeCallbacks(reiniciar)
             try {
-                reconhecedor?.destroy()
+                porcupine?.stop()
             } catch (e: Exception) {
             }
-            reconhecedor = null
-            falar("Pois não, senhor?")
+            bip()
+            ui.postDelayed({ ouvirComando() }, 250)
         }
         return START_NOT_STICKY
     }
@@ -113,26 +101,73 @@ class JarvisService : Service() {
             .build()
     }
 
-    private fun emComando(): Boolean = SystemClock.elapsedRealtime() < comandoAte
-
-    private fun mudar(s: String, p: Boolean) {
+    private fun mudar(s: String, m: Int) {
         ultimoStatus = s
-        aoMudar?.invoke(s, p)
+        ultimoModo = m
+        aoMudar?.invoke(s, m)
     }
 
     private fun logar(l: String) {
         linhas.add(l)
+        totalLinhas++
         while (linhas.size > 40) linhas.removeAt(0)
         aoLogar?.invoke(l)
     }
 
-    private fun agendar(ms: Long) {
-        ui.removeCallbacks(reiniciar)
-        ui.postDelayed(reiniciar, ms)
+    private fun bip() {
+        try {
+            val tg = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+            tg.startTone(ToneGenerator.TONE_PROP_ACK, 120)
+            ui.postDelayed({ tg.release() }, 400)
+        } catch (e: Exception) {
+        }
     }
 
-    private fun iniciarEscuta() {
+    private fun iniciarPalavra() {
         if (parado || ocupado) return
+        try {
+            if (porcupine == null) {
+                val chave = getSharedPreferences("jarvis", Context.MODE_PRIVATE).getString("chave_pv", "") ?: ""
+                if (chave.isEmpty()) {
+                    mudar("Falta a chave da Picovoice. Abra o app e segure o título.", M_ESPERA)
+                    return
+                }
+                porcupine = PorcupineManager.Builder()
+                    .setAccessKey(chave)
+                    .setKeyword(Porcupine.BuiltInKeyword.JARVIS)
+                    .setSensitivity(0.7f)
+                    .setErrorCallback(PorcupineManagerErrorCallback { e ->
+                        ui.post { mudar("Erro no microfone: " + e.message, M_ESPERA) }
+                    })
+                    .build(this, PorcupineManagerCallback { _ -> ui.post { acordar() } })
+            }
+            porcupine?.start()
+            mudar(aguardando, M_ESPERA)
+        } catch (e: Exception) {
+            porcupine = null
+            mudar("Palavra de ativação falhou: " + (e.message ?: "erro") + ". Confira a chave da Picovoice.", M_ESPERA)
+        }
+    }
+
+    private fun acordar() {
+        if (parado || ocupado) return
+        ocupado = true
+        try {
+            porcupine?.stop()
+        } catch (e: Exception) {
+        }
+        mudar("Ouvindo...", M_OUVINDO)
+        bip()
+        ui.postDelayed({ ouvirComando() }, 250)
+    }
+
+    private fun ouvirComando() {
+        if (parado) return
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            voltar()
+            return
+        }
+        mudar("Ouvindo...", M_OUVINDO)
         try {
             reconhecedor?.destroy()
         } catch (e: Exception) {
@@ -140,9 +175,7 @@ class JarvisService : Service() {
         val r = SpeechRecognizer.createSpeechRecognizer(this)
         reconhecedor = r
         r.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                if (emComando()) mudar("Ouvindo...", true) else mudar(aguardando, false)
-            }
+            override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
@@ -152,11 +185,11 @@ class JarvisService : Service() {
                     encerrar()
                     return
                 }
-                agendar(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1500L else 400L)
+                voltar()
             }
             override fun onResults(results: Bundle?) {
                 val texto = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (texto.isNullOrBlank()) agendar(300L) else tratar(texto)
+                if (texto.isNullOrBlank()) voltar() else processar(texto)
             }
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -170,37 +203,18 @@ class JarvisService : Service() {
         r.startListening(i)
     }
 
-    private fun tratar(texto: String) {
-        val m = Regex("\\b(j[aáà]rvis|jarvi|garvis|j[aá]rves|harvis|jarvas)\\b", RegexOption.IGNORE_CASE).find(texto)
-        if (m != null) {
-            val resto = texto.substring(m.range.last + 1).trim(' ', ',', '.', '!', '?')
-            if (resto.length >= 3) {
-                comandoAte = 0L
-                processar(resto)
-            } else {
-                comandoAte = SystemClock.elapsedRealtime() + 8000
-                ocupado = true
-                falar("Pois não, senhor?")
-            }
-        } else if (emComando()) {
-            comandoAte = 0L
-            processar(texto)
-        } else {
-            agendar(150L)
-        }
-    }
-
     private fun processar(cmd: String) {
         ocupado = true
         logar("Você: $cmd")
-        mudar("Pensando...", true)
+        mudar("Pensando...", M_PENSANDO)
         thread {
             val fala = try {
-                cerebro.processar(cmd)
+                Extras.tentar(this, cmd) ?: cerebro.processar(cmd)
             } catch (e: Exception) {
                 "Ocorreu um erro, senhor."
             }
             ui.post {
+                if (parado) return@post
                 logar("Jarvis: $fala")
                 falar(fala)
             }
@@ -208,38 +222,33 @@ class JarvisService : Service() {
     }
 
     private fun falar(texto: String) {
-        val limpo = texto.replace("*", "").replace("#", "").replace("_", " ")
-        if (!ttsPronto || parado) {
-            fimDaFala()
-            return
-        }
-        mudar("Falando...", true)
-        tts?.speak(limpo, TextToSpeech.QUEUE_FLUSH, null, "jarvis")
+        mudar("Falando...", M_FALANDO)
+        voz.falar(texto) { voltar() }
     }
 
-    private fun fimDaFala() {
-        if (parado) return
+    private fun voltar() {
         ocupado = false
-        mudar(aguardando, false)
-        agendar(300L)
+        if (parado) return
+        mudar(aguardando, M_ESPERA)
+        ui.postDelayed({ iniciarPalavra() }, 400)
     }
 
     private fun encerrar() {
         parado = true
         rodando = false
-        ui.removeCallbacks(reiniciar)
         try {
             reconhecedor?.destroy()
         } catch (e: Exception) {
         }
         reconhecedor = null
         try {
-            tts?.stop()
-            tts?.shutdown()
+            porcupine?.stop()
+            porcupine?.delete()
         } catch (e: Exception) {
         }
-        tts = null
-        mudar("Jarvis desativado", false)
+        porcupine = null
+        voz.encerrar()
+        mudar("Jarvis desativado", M_ESPERA)
         stopForeground(true)
         stopSelf()
     }
@@ -247,16 +256,20 @@ class JarvisService : Service() {
     override fun onDestroy() {
         parado = true
         rodando = false
-        ui.removeCallbacks(reiniciar)
         try {
             reconhecedor?.destroy()
         } catch (e: Exception) {
         }
         try {
-            tts?.shutdown()
+            porcupine?.stop()
+            porcupine?.delete()
         } catch (e: Exception) {
         }
-        tts = null
+        porcupine = null
+        try {
+            voz.encerrar()
+        } catch (e: Exception) {
+        }
         super.onDestroy()
     }
 }
