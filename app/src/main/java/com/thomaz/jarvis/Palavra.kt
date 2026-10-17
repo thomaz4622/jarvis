@@ -23,10 +23,11 @@ class Palavra(private val ctx: Context) {
     private var reconhecedor: Recognizer? = null
     private var preparando = false
     private var disparou = false
+    private var ultimoOuvido = ""
 
     private val nomePasta = "vosk-model-small-pt-0.3"
     private val url = "https://alphacephei.com/vosk/models/vosk-model-small-pt-0.3.zip"
-    private val regex = Regex("j[aá]rv|g[aá]rv|h[aá]rv|j[aá]rbas|j[aá]rves|j[aá]rb")
+    private val regex = Regex("j[aá]r?[vb]|g[aá]r?[vb]|h[aá]rv|j[aá] v[ií]s|garbi|jarbi")
 
     fun preparar(status: (String) -> Unit, pronto: () -> Unit, erro: (String) -> Unit) {
         if (modelo != null) {
@@ -104,6 +105,7 @@ class Palavra(private val ctx: Context) {
         val m = modelo ?: return
         parar()
         disparou = false
+        ultimoOuvido = ""
         try {
             val r = Recognizer(m, 16000.0f)
             reconhecedor = r
@@ -133,6 +135,16 @@ class Palavra(private val ctx: Context) {
             JSONObject(json).optString(campo, "")
         } catch (e: Exception) {
             ""
+        }
+        if (txt.isNotEmpty() && txt != ultimoOuvido) {
+            ultimoOuvido = txt
+            ui.post {
+                if (!disparou) {
+                    val s = "Ouvi: " + txt
+                    JarvisService.ultimoStatus = s
+                    JarvisService.aoMudar?.invoke(s, 0)
+                }
+            }
         }
         if (txt.isNotEmpty() && regex.containsMatchIn(txt.lowercase())) {
             disparou = true
